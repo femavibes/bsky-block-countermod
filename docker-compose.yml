@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  block-watcher:
+    build: .
+    container_name: bsky-block-countermod
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/usr/src/app/logs
+    environment:
+      - NODE_ENV=production

@@ -66,6 +66,16 @@ bun start
 bun dev
 ```
 
+### Local Development
+
+```bash
+# Install dependencies
+bun install
+
+# Start in development mode
+bun dev
+```
+
 ## Utilities
 
 Find DIDs from handles:
@@ -93,9 +103,43 @@ With this service:
 
 ## Requirements
 
-- [Bun](https://bun.sh/) runtime
+- [Bun](https://bun.sh/) runtime or Docker
 - Bluesky accounts with app passwords
 - Subscription to [@listifications.app](https://bsky.app/profile/listifications.app)
+
+## Docker Deployment
+
+### Quick Start
+
+```bash
+# Clone the repository
+git clone https://github.com/femavibes/bsky-block-countermod.git
+cd bsky-block-countermod
+
+# Copy and configure environment
+cp .env.example .env
+nano .env
+
+# Run with Docker Compose
+docker compose up -d
+```
+
+### Docker Hub
+
+Pre-built images are available at:
+```bash
+docker pull ghcr.io/femavibes/bsky-block-countermod:latest
+```
+
+### Manual Docker Run
+
+```bash
+docker run -d \
+  --name bsky-block-countermod \
+  --env-file .env \
+  --restart unless-stopped \
+  ghcr.io/femavibes/bsky-block-countermod:latest
+```
 
 ## License
 
