@@ -8,16 +8,168 @@ interface MonitorAccount {
   password: string;
 }
 
+interface SessionData {
+  accessJwt: string;
+  refreshJwt: string;
+  handle: string;
+  did: string;
+  expires: number;
+}
+
+interface AuthenticatedAccount {
+  account: MonitorAccount;
+  agent: AtpAgent;
+  sessionValid: boolean;
+}
+
 class BlockWatcher {
   private monitorAccounts: MonitorAccount[] = [];
   private blockersListUri: string = "";
   private listAgent?: AtpAgent;
+  private authenticatedAccounts: AuthenticatedAccount[] = [];
   private pollInterval: number = 30000;
   private dryRun: boolean = false;
   private backfillHours: number = 24;
+  private sessionsFile = "./sessions.json";
 
   constructor() {
     this.loadConfig();
+  }
+
+  private async authenticateAllAccounts() {
+    const listAccount = {
+      handle: process.env.LIST_ACCOUNT_HANDLE || "",
+      password: process.env.LIST_ACCOUNT_PASSWORD || ""
+    };
+    
+    // Load existing sessions
+    const savedSessions = await this.loadSessions();
+    
+    // Authenticate list account
+    const listAuth = await this.authenticateAccount(listAccount, savedSessions);
+    if (listAuth.sessionValid) {
+      this.listAgent = listAuth.agent;
+      console.log(`✓ List account authenticated: ${listAccount.handle}`);
+    } else {
+      console.error(`✗ List account failed to authenticate: ${listAccount.handle}`);
+    }
+    
+    // Authenticate monitor accounts
+    const failedAccounts: string[] = [];
+    for (const account of this.monitorAccounts) {
+      const auth = await this.authenticateAccount(account, savedSessions);
+      if (auth.sessionValid) {
+        this.authenticatedAccounts.push(auth);
+        console.log(`✓ Monitor account authenticated: ${account.handle}`);
+      } else {
+        failedAccounts.push(account.handle);
+        console.error(`✗ Monitor account failed to authenticate: ${account.handle}`);
+      }
+    }
+    
+    // Save updated sessions
+    await this.saveSessions();
+    
+    // Report status
+    const successCount = this.authenticatedAccounts.length;
+    const totalCount = this.monitorAccounts.length;
+    console.log(`Authentication complete: ${successCount}/${totalCount} monitor accounts active`);
+    
+    if (failedAccounts.length > 0) {
+      console.warn(`⚠️  Unmonitored accounts (rate limited or invalid credentials): ${failedAccounts.join(", ")}`);
+      console.warn(`These accounts will be retried on next restart`);
+    }
+  }
+
+  private async authenticateAccount(account: MonitorAccount, savedSessions: Record<string, SessionData>): Promise<AuthenticatedAccount> {
+    const agent = new AtpAgent({ service: "https://bsky.social" });
+    
+    // Try to restore session first
+    const savedSession = savedSessions[account.handle];
+    if (savedSession && savedSession.expires > Date.now()) {
+      try {
+        agent.session = {
+          accessJwt: savedSession.accessJwt,
+          refreshJwt: savedSession.refreshJwt,
+          handle: savedSession.handle,
+          did: savedSession.did
+        };
+        
+        // Test the session with a simple API call
+        await agent.getProfile({ actor: savedSession.did });
+        
+        return { account, agent, sessionValid: true };
+      } catch (error) {
+        console.log(`Cached session expired for ${account.handle}, attempting fresh login`);
+      }
+    }
+    
+    // Fresh login if no valid session
+    try {
+      await agent.login({
+        identifier: account.handle,
+        password: account.password
+      });
+      
+      // Save the new session
+      if (agent.session) {
+        savedSessions[account.handle] = {
+          accessJwt: agent.session.accessJwt,
+          refreshJwt: agent.session.refreshJwt,
+          handle: agent.session.handle,
+          did: agent.session.did,
+          expires: Date.now() + (23 * 60 * 60 * 1000) // 23 hours
+        };
+      }
+      
+      return { account, agent, sessionValid: true };
+    } catch (error) {
+      return { account, agent, sessionValid: false };
+    }
+  }
+
+  private async loadSessions(): Promise<Record<string, SessionData>> {
+    try {
+      const data = await Bun.file(this.sessionsFile).text();
+      return JSON.parse(data);
+    } catch {
+      return {};
+    }
+  }
+
+  private async saveSessions() {
+    const sessions: Record<string, SessionData> = {};
+    
+    // Save list account session
+    if (this.listAgent?.session) {
+      const handle = process.env.LIST_ACCOUNT_HANDLE || "";
+      sessions[handle] = {
+        accessJwt: this.listAgent.session.accessJwt,
+        refreshJwt: this.listAgent.session.refreshJwt,
+        handle: this.listAgent.session.handle,
+        did: this.listAgent.session.did,
+        expires: Date.now() + (23 * 60 * 60 * 1000)
+      };
+    }
+    
+    // Save monitor account sessions
+    for (const auth of this.authenticatedAccounts) {
+      if (auth.agent.session) {
+        sessions[auth.account.handle] = {
+          accessJwt: auth.agent.session.accessJwt,
+          refreshJwt: auth.agent.session.refreshJwt,
+          handle: auth.agent.session.handle,
+          did: auth.agent.session.did,
+          expires: Date.now() + (23 * 60 * 60 * 1000)
+        };
+      }
+    }
+    
+    try {
+      await Bun.write(this.sessionsFile, JSON.stringify(sessions, null, 2));
+    } catch (error) {
+      console.error("Failed to save sessions:", error);
+    }
   }
 
   private normalizeListUri(uri: string): string {
@@ -46,6 +198,16 @@ class BlockWatcher {
         return { handle: handle.trim(), password: password.trim() };
       });
 
+    // Add list account to monitor accounts if enabled
+    const monitorListAccount = process.env.MONITOR_LIST_ACCOUNT === "true";
+    if (monitorListAccount) {
+      const listHandle = process.env.LIST_ACCOUNT_HANDLE || "";
+      const listPassword = process.env.LIST_ACCOUNT_PASSWORD || "";
+      if (listHandle && listPassword) {
+        this.monitorAccounts.unshift({ handle: listHandle, password: listPassword });
+      }
+    }
+
     this.blockersListUri = this.normalizeListUri(process.env.BLOCKERS_LIST_URI || "");
     this.pollInterval = parseInt(process.env.POLL_INTERVAL_SECONDS || "30") * 1000;
     this.dryRun = process.env.DRY_RUN === "true";
@@ -63,21 +225,21 @@ class BlockWatcher {
       return;
     }
 
-    // Create agent for managing the blockers list
-    this.listAgent = new AtpAgent({ service: "https://bsky.social" });
-    await this.listAgent.login({
-      identifier: process.env.LIST_ACCOUNT_HANDLE || "",
-      password: process.env.LIST_ACCOUNT_PASSWORD || ""
-    });
-
     console.log(`Block watcher monitoring ${this.monitorAccounts.length} accounts`);
     console.log(`Poll interval: ${this.pollInterval/1000}s, Dry run: ${this.dryRun}, Backfill: ${this.backfillHours}h`);
     
+    if (this.dryRun) {
+      console.log("[DRY RUN] Skipping all API calls - configuration test mode");
+    } else {
+      // Authenticate all accounts with session persistence
+      await this.authenticateAllAccounts();
+      
+      // Initial backfill check for authenticated accounts
+      await this.backfillAllAccounts();
+    }
+    
     // Start health server
     this.startHealthServer();
-    
-    // Initial backfill check
-    await this.backfillAllAccounts();
     
     // Poll at configured interval
     setInterval(() => this.checkAllAccounts(), this.pollInterval);
@@ -87,18 +249,22 @@ class BlockWatcher {
   }
 
   private async checkAllAccounts() {
-    for (const account of this.monitorAccounts) {
+    if (this.dryRun) {
+      console.log("[DRY RUN] Would check all accounts for block notifications");
+      return;
+    }
+    
+    for (const auth of this.authenticatedAccounts) {
       try {
-        await this.checkAccount(account);
+        await this.checkAuthenticatedAccount(auth);
       } catch (error) {
-        console.error(`Error checking ${account.handle}:`, error);
+        console.error(`Error checking ${auth.account.handle}:`, error);
       }
     }
   }
 
-  private async checkAccount(account: MonitorAccount) {
-    const agent = new AtpAgent({ service: "https://bsky.social" });
-    await agent.login({ identifier: account.handle, password: account.password });
+  private async checkAuthenticatedAccount(auth: AuthenticatedAccount) {
+    const { account, agent } = auth;
 
     try {
       // Try DMs first
@@ -139,22 +305,26 @@ class BlockWatcher {
   }
 
   private async backfillAllAccounts() {
+    if (this.dryRun) {
+      console.log(`[DRY RUN] Would backfill last ${this.backfillHours} hours for ${this.monitorAccounts.length} accounts`);
+      return;
+    }
+    
     console.log(`Starting backfill for last ${this.backfillHours} hours...`);
     const cutoffTime = new Date(Date.now() - (this.backfillHours * 60 * 60 * 1000));
     
-    for (const account of this.monitorAccounts) {
+    for (const auth of this.authenticatedAccounts) {
       try {
-        await this.backfillAccount(account, cutoffTime);
+        await this.backfillAuthenticatedAccount(auth, cutoffTime);
       } catch (error) {
-        console.error(`Error backfilling ${account.handle}:`, error);
+        console.error(`Error backfilling ${auth.account.handle}:`, error);
       }
     }
     console.log("Backfill complete");
   }
 
-  private async backfillAccount(account: MonitorAccount, cutoffTime: Date) {
-    const agent = new AtpAgent({ service: "https://bsky.social" });
-    await agent.login({ identifier: account.handle, password: account.password });
+  private async backfillAuthenticatedAccount(auth: AuthenticatedAccount, cutoffTime: Date) {
+    const { account, agent } = auth;
 
     try {
       // Check DMs for backfill

@@ -1,6 +1,6 @@
 services:
   block-watcher:
-    image: ghcr.io/femavibes/bsky-block-countermod:latest
+    build: .
     container_name: bsky-block-countermod
     restart: unless-stopped
     env_file:
