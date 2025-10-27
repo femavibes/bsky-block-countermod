@@ -40,18 +40,29 @@ cp .env.example .env
 nano .env
 ```
 
-Required settings:
+Create a `.env` file with your settings:
+
 ```bash
 # Account that manages the blockers list (handle or DID)
 LIST_ACCOUNT_HANDLE=youraccount.bsky.social
 LIST_ACCOUNT_PASSWORD=your-app-password
+# Also monitor this account for blocks (avoids duplicate login)
+MONITOR_LIST_ACCOUNT=true
 
-# Accounts to monitor (supports handles and DIDs, each should subscribe to listifications)
-MONITOR_ACCOUNTS=mainaccount.bsky.social:apppass1,altaccount.bsky.social:apppass2,did:plc:example123:apppass3
+# Moderation list to add blockers to (supports both formats):
+# Web URL: https://bsky.app/profile/did:plc:youraccountdid/lists/3l2ujiym5dm2z
+# AT-URI: at://did:plc:youraccountdid/app.bsky.graph.list/3l2ujiym5dm2z
+BLOCKERS_LIST_URI=
 
-# Your moderation list (supports both web URL and AT-URI formats)
-BLOCKERS_LIST_URI=https://bsky.app/profile/did:plc:youraccountdid/lists/3l2ujiym5dm2z
-# OR: at://did:plc:youraccountdid/app.bsky.graph.list/3l2ujiym5dm2z
+# Additional accounts to monitor for blocks (format: handle_or_did:password)
+# Supports both handles and DIDs. Each account should subscribe to listifications.app
+MONITOR_ACCOUNTS=altaccount.bsky.social:apppassword2,did:plc:example123:apppassword3
+
+# Optional settings
+POLL_INTERVAL_SECONDS=30
+DRY_RUN=false
+PORT=3000
+BACKFILL_HOURS=24
 ```
 
 ### 4. Run the service
