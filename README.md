@@ -125,6 +125,26 @@ nano .env
 docker compose up -d
 ```
 
+### Docker Compose File
+
+The included `docker-compose.yml`:
+
+```yaml
+version: '3.8'
+
+services:
+  block-watcher:
+    build: .
+    container_name: bsky-block-countermod
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/usr/src/app/logs
+    environment:
+      - NODE_ENV=production
+```
+
 ### Docker Hub
 
 Pre-built images are available at:
