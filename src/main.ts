@@ -12,9 +12,28 @@ class BlockWatcher {
   private monitorAccounts: MonitorAccount[] = [];
   private blockersListUri: string = "";
   private listAgent?: Agent;
+  private pollInterval: number = 30000;
+  private dryRun: boolean = false;
+  private backfillHours: number = 24;
 
   constructor() {
     this.loadConfig();
+  }
+
+  private normalizeListUri(uri: string): string {
+    if (!uri) return uri;
+    
+    // Convert web URL to AT-URI
+    // https://bsky.app/profile/did:plc:abc123/lists/3l2ujiym5dm2z
+    // -> at://did:plc:abc123/app.bsky.graph.list/3l2ujiym5dm2z
+    const webUrlMatch = uri.match(/https:\/\/bsky\.app\/profile\/(did:[^/]+)\/lists\/([^/?]+)/);
+    if (webUrlMatch) {
+      const [, did, rkey] = webUrlMatch;
+      return `at://${did}/app.bsky.graph.list/${rkey}`;
+    }
+    
+    // Already AT-URI format or invalid
+    return uri;
   }
 
   private loadConfig() {
@@ -27,7 +46,10 @@ class BlockWatcher {
         return { handle: handle.trim(), password: password.trim() };
       });
 
-    this.blockersListUri = process.env.BLOCKERS_LIST_URI || "";
+    this.blockersListUri = this.normalizeListUri(process.env.BLOCKERS_LIST_URI || "");
+    this.pollInterval = parseInt(process.env.POLL_INTERVAL_SECONDS || "30") * 1000;
+    this.dryRun = process.env.DRY_RUN === "true";
+    this.backfillHours = parseInt(process.env.BACKFILL_HOURS || "24");
   }
 
   async start() {
@@ -49,9 +71,16 @@ class BlockWatcher {
     });
 
     console.log(`Block watcher monitoring ${this.monitorAccounts.length} accounts`);
+    console.log(`Poll interval: ${this.pollInterval/1000}s, Dry run: ${this.dryRun}, Backfill: ${this.backfillHours}h`);
     
-    // Poll every 30 seconds
-    setInterval(() => this.checkAllAccounts(), 30000);
+    // Start health server
+    this.startHealthServer();
+    
+    // Initial backfill check
+    await this.backfillAllAccounts();
+    
+    // Poll at configured interval
+    setInterval(() => this.checkAllAccounts(), this.pollInterval);
     
     // Initial check
     await this.checkAllAccounts();
@@ -81,7 +110,7 @@ class BlockWatcher {
       if (listificationsConvo) {
         const messages = await agent.app.bsky.convo.getMessages({
           convoId: listificationsConvo.id,
-          limit: 20
+          limit: 50
         });
 
         for (const message of messages.data.messages) {
@@ -109,7 +138,53 @@ class BlockWatcher {
     }
   }
 
-  private async processNotification(text: string, targetHandle: string) {
+  private async backfillAllAccounts() {
+    console.log(`Starting backfill for last ${this.backfillHours} hours...`);
+    const cutoffTime = new Date(Date.now() - (this.backfillHours * 60 * 60 * 1000));
+    
+    for (const account of this.monitorAccounts) {
+      try {
+        await this.backfillAccount(account, cutoffTime);
+      } catch (error) {
+        console.error(`Error backfilling ${account.handle}:`, error);
+      }
+    }
+    console.log("Backfill complete");
+  }
+
+  private async backfillAccount(account: MonitorAccount, cutoffTime: Date) {
+    const agent = new Agent({ service: "https://bsky.social" });
+    await agent.login({ identifier: account.handle, password: account.password });
+
+    try {
+      // Check DMs for backfill
+      const convos = await agent.app.bsky.convo.listConvos({ limit: 10 });
+      const listificationsConvo = convos.data.convos.find(
+        convo => convo.members.some(member => member.did === LISTIFICATIONS_DID)
+      );
+
+      if (listificationsConvo) {
+        // Get more messages for backfill
+        const messages = await agent.app.bsky.convo.getMessages({
+          convoId: listificationsConvo.id,
+          limit: 100
+        });
+
+        for (const message of messages.data.messages) {
+          if (message.sender.did === LISTIFICATIONS_DID) {
+            const messageTime = new Date(message.sentAt);
+            if (messageTime >= cutoffTime) {
+              await this.processNotification(message.text, account.handle, true);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Failed to backfill DMs for ${account.handle}:`, error);
+    }
+  }
+
+  private async processNotification(text: string, targetHandle: string, isBackfill = false) {
     const blockPattern = /@([\w.-]+)\s+has blocked you/i;
     const modListPattern = /@([\w.-]+)\s+has added you to the "[^"]*"\s+moderation list/i;
     
@@ -130,7 +205,8 @@ class BlockWatcher {
       });
       const offenderDid = resolved.data.did;
       
-      console.log(`Detected: ${offenderHandle} (${offenderDid}) ${action} ${targetHandle}`);
+      const prefix = isBackfill ? "[BACKFILL]" : "";
+      console.log(`${prefix} Detected: ${offenderHandle} (${offenderDid}) ${action} ${targetHandle}`);
       
       // Add to blockers list
       await this.addToBlockersList(offenderDid);
@@ -142,6 +218,27 @@ class BlockWatcher {
 
   private async addToBlockersList(userDid: string) {
     if (!this.listAgent) return;
+    
+    // Check if user is already in the list
+    try {
+      const list = await this.listAgent.app.bsky.graph.getList({
+        list: this.blockersListUri,
+        limit: 100
+      });
+      
+      const alreadyInList = list.data.items.some(item => item.subject.did === userDid);
+      if (alreadyInList) {
+        console.log(`${userDid} already in blockers list, skipping`);
+        return;
+      }
+    } catch (error) {
+      console.error(`Failed to check if user in list:`, error);
+    }
+    
+    if (this.dryRun) {
+      console.log(`[DRY RUN] Would add ${userDid} to blockers list`);
+      return;
+    }
     
     try {
       await this.listAgent.app.bsky.graph.listitem.create(
@@ -157,6 +254,31 @@ class BlockWatcher {
     } catch (error) {
       console.error(`Failed to add ${userDid} to list:`, error);
     }
+  }
+
+  private startHealthServer() {
+    const port = parseInt(process.env.PORT || "3000");
+    
+    const server = Bun.serve({
+      port,
+      fetch(req) {
+        const url = new URL(req.url);
+        
+        if (url.pathname === "/health") {
+          return new Response(JSON.stringify({
+            status: "ok",
+            timestamp: new Date().toISOString(),
+            uptime: process.uptime()
+          }), {
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        
+        return new Response("Not Found", { status: 404 });
+      }
+    });
+    
+    console.log(`Health server running on port ${port}`);
   }
 }
 

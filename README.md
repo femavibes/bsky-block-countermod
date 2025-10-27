@@ -42,15 +42,16 @@ nano .env
 
 Required settings:
 ```bash
-# Account that manages the blockers list
-LIST_ACCOUNT_HANDLE=yourlabeler.bsky.social
+# Account that manages the blockers list (handle or DID)
+LIST_ACCOUNT_HANDLE=youraccount.bsky.social
 LIST_ACCOUNT_PASSWORD=your-app-password
 
-# Accounts to monitor (each should subscribe to listifications)
-MONITOR_ACCOUNTS=mainaccount.bsky.social:apppass1,altaccount.bsky.social:apppass2
+# Accounts to monitor (supports handles and DIDs, each should subscribe to listifications)
+MONITOR_ACCOUNTS=mainaccount.bsky.social:apppass1,altaccount.bsky.social:apppass2,did:plc:example123:apppass3
 
-# Your moderation list AT-URI
-BLOCKERS_LIST_URI=at://did:plc:youraccountdid/app.bsky.graph.list/3l2ujiym5dm2z
+# Your moderation list (supports both web URL and AT-URI formats)
+BLOCKERS_LIST_URI=https://bsky.app/profile/did:plc:youraccountdid/lists/3l2ujiym5dm2z
+# OR: at://did:plc:youraccountdid/app.bsky.graph.list/3l2ujiym5dm2z
 ```
 
 ### 4. Run the service
