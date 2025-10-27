@@ -130,11 +130,9 @@ docker compose up -d
 The included `docker-compose.yml`:
 
 ```yaml
-version: '3.8'
-
 services:
   block-watcher:
-    build: .
+    image: ghcr.io/femavibes/bsky-block-countermod:latest
     container_name: bsky-block-countermod
     restart: unless-stopped
     env_file:

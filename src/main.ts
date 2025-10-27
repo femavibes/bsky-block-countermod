@@ -1,4 +1,4 @@
-import { Agent } from "@atproto/api";
+import { AtpAgent } from "@atproto/api";
 import "dotenv/config";
 
 const LISTIFICATIONS_DID = "did:plc:ea2eqamjmtuo6f4rvhl3g6ne";
@@ -11,7 +11,7 @@ interface MonitorAccount {
 class BlockWatcher {
   private monitorAccounts: MonitorAccount[] = [];
   private blockersListUri: string = "";
-  private listAgent?: Agent;
+  private listAgent?: AtpAgent;
   private pollInterval: number = 30000;
   private dryRun: boolean = false;
   private backfillHours: number = 24;
@@ -64,7 +64,7 @@ class BlockWatcher {
     }
 
     // Create agent for managing the blockers list
-    this.listAgent = new Agent({ service: "https://bsky.social" });
+    this.listAgent = new AtpAgent({ service: "https://bsky.social" });
     await this.listAgent.login({
       identifier: process.env.LIST_ACCOUNT_HANDLE || "",
       password: process.env.LIST_ACCOUNT_PASSWORD || ""
@@ -97,7 +97,7 @@ class BlockWatcher {
   }
 
   private async checkAccount(account: MonitorAccount) {
-    const agent = new Agent({ service: "https://bsky.social" });
+    const agent = new AtpAgent({ service: "https://bsky.social" });
     await agent.login({ identifier: account.handle, password: account.password });
 
     try {
@@ -153,7 +153,7 @@ class BlockWatcher {
   }
 
   private async backfillAccount(account: MonitorAccount, cutoffTime: Date) {
-    const agent = new Agent({ service: "https://bsky.social" });
+    const agent = new AtpAgent({ service: "https://bsky.social" });
     await agent.login({ identifier: account.handle, password: account.password });
 
     try {
