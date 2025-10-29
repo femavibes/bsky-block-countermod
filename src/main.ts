@@ -30,7 +30,7 @@ class BlockWatcher {
   private pollInterval: number = 30000;
   private dryRun: boolean = false;
   private backfillHours: number = 24;
-  private sessionsFile = "./sessions.json";
+  private sessionsFile = "/usr/src/app/logs/sessions.json";
 
   constructor() {
     this.loadConfig();
@@ -192,9 +192,11 @@ class BlockWatcher {
     const monitorAccountsRaw = process.env.MONITOR_ACCOUNTS || "";
     this.monitorAccounts = monitorAccountsRaw
       .split(",")
-      .filter(entry => entry.includes(":"))
+      .filter(entry => entry.trim() && entry.includes(":"))
       .map(entry => {
-        const [handle, password] = entry.split(":");
+        const parts = entry.trim().split(":");
+        const handle = parts.slice(0, -1).join(":"); // Handle DIDs with multiple colons
+        const password = parts[parts.length - 1];
         return { handle: handle.trim(), password: password.trim() };
       });
 
