@@ -30,7 +30,7 @@ class BlockWatcher {
   private pollInterval: number = 30000;
   private dryRun: boolean = false;
   private backfillHours: number = 24;
-  private sessionsFile = "/usr/src/app/logs/sessions.json";
+  private sessionsFile = "/tmp/sessions.json";
 
   constructor() {
     this.loadConfig();
@@ -269,14 +269,24 @@ class BlockWatcher {
     const { account, agent } = auth;
 
     try {
-      // Try DMs first
-      const convos = await agent.app.bsky.convo.listConvos({ limit: 10 });
+      // Try DMs first (fallback to notifications if DM API unavailable)
+      let convos;
+      try {
+        convos = await agent.app.bsky.convo?.listConvos({ limit: 10 });
+      } catch {
+        // DM API not available, skip to notifications fallback
+        throw new Error("DM API unavailable");
+      }
+      
+      if (!convos) {
+        throw new Error("DM API unavailable");
+      }
       const listificationsConvo = convos.data.convos.find(
         convo => convo.members.some(member => member.did === LISTIFICATIONS_DID)
       );
 
       if (listificationsConvo) {
-        const messages = await agent.app.bsky.convo.getMessages({
+        const messages = await agent.app.bsky.convo?.getMessages({
           convoId: listificationsConvo.id,
           limit: 50
         });
@@ -329,15 +339,26 @@ class BlockWatcher {
     const { account, agent } = auth;
 
     try {
-      // Check DMs for backfill
-      const convos = await agent.app.bsky.convo.listConvos({ limit: 10 });
+      // Check DMs for backfill (fallback to notifications if DM API unavailable)
+      let convos;
+      try {
+        convos = await agent.app.bsky.convo?.listConvos({ limit: 10 });
+      } catch {
+        console.log(`DM API not available for ${account.handle}, skipping DM backfill`);
+        return;
+      }
+      
+      if (!convos) {
+        console.log(`DM API not available for ${account.handle}, skipping DM backfill`);
+        return;
+      }
       const listificationsConvo = convos.data.convos.find(
         convo => convo.members.some(member => member.did === LISTIFICATIONS_DID)
       );
 
       if (listificationsConvo) {
         // Get more messages for backfill
-        const messages = await agent.app.bsky.convo.getMessages({
+        const messages = await agent.app.bsky.convo?.getMessages({
           convoId: listificationsConvo.id,
           limit: 100
         });
