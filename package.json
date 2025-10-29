@@ -11,7 +11,7 @@
     "get-did": "bun scripts/get-did.ts"
   },
   "dependencies": {
-    "@atproto/api": "^0.14.21",
+    "@atproto/api": "^0.17.5",
     "dotenv": "^16.4.7"
   },
   "devDependencies": {

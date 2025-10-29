@@ -1,7 +1,8 @@
 import { AtpAgent } from "@atproto/api";
 import "dotenv/config";
 
-const LISTIFICATIONS_DID = "did:plc:ea2eqamjmtuo6f4rvhl3g6ne";
+const LISTIFICATIONS_DID = "did:plc:yatb2t26fw7u3c7qcacq7rje";
+const LISTIFICATIONS_HANDLE = "listifications.app";
 
 interface MonitorAccount {
   handle: string;
@@ -31,9 +32,12 @@ class BlockWatcher {
   private dryRun: boolean = false;
   private backfillHours: number = 24;
   private sessionsFile = "/usr/src/app/logs/sessions.json";
+  private processedMessages = new Set<string>();
+  private processedMessagesFile = "/usr/src/app/logs/processed_messages.json";
 
   constructor() {
     this.loadConfig();
+    this.loadProcessedMessages();
   }
 
   private async authenticateAllAccounts() {
@@ -75,6 +79,10 @@ class BlockWatcher {
     const totalCount = this.monitorAccounts.length;
     console.log(`Authentication complete: ${successCount}/${totalCount} monitor accounts active`);
     
+    // Manual test of the block message processing
+    console.log("Testing block message processing...");
+    await this.processNotification("@abolition.bsky.social has blocked you", "did:plc:c5d5thu6uwhb5odxgk7ejvni");
+    
     if (failedAccounts.length > 0) {
       console.warn(`⚠️  Unmonitored accounts (rate limited or invalid credentials): ${failedAccounts.join(", ")}`);
       console.warn(`These accounts will be retried on next restart`);
@@ -82,7 +90,9 @@ class BlockWatcher {
   }
 
   private async authenticateAccount(account: MonitorAccount, savedSessions: Record<string, SessionData>): Promise<AuthenticatedAccount> {
-    const agent = new AtpAgent({ service: "https://bsky.social" });
+    const agent = new AtpAgent({ 
+      service: "https://bsky.social"
+    });
     
     // Try to restore session first
     const savedSession = savedSessions[account.handle];
@@ -134,6 +144,25 @@ class BlockWatcher {
       return JSON.parse(data);
     } catch {
       return {};
+    }
+  }
+
+  private async loadProcessedMessages() {
+    try {
+      const data = await Bun.file(this.processedMessagesFile).text();
+      const messageIds = JSON.parse(data);
+      this.processedMessages = new Set(messageIds);
+    } catch {
+      this.processedMessages = new Set();
+    }
+  }
+
+  private async saveProcessedMessages() {
+    try {
+      const messageIds = Array.from(this.processedMessages);
+      await Bun.write(this.processedMessagesFile, JSON.stringify(messageIds, null, 2));
+    } catch (error) {
+      console.warn("Failed to save processed messages:", error.message);
     }
   }
 
@@ -275,40 +304,94 @@ class BlockWatcher {
       // Try DMs first (fallback to notifications if DM API unavailable)
       let convos;
       try {
-        convos = await agent.app.bsky.convo?.listConvos({ limit: 10 });
-      } catch {
-        // DM API not available, skip to notifications fallback
+          // Direct XRPC call to chat service like third-party clients
+        const response = await fetch('https://api.bsky.chat/xrpc/chat.bsky.convo.listConvos?limit=10', {
+          headers: {
+            'Authorization': `Bearer ${agent.session?.accessJwt}`,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        
+        convos = await response.json();
+      } catch (error) {
+        console.log(`DM API failed: ${error.message}`);
         throw new Error("DM API unavailable");
       }
       
-      if (!convos) {
+      if (!convos || !convos.convos) {
         throw new Error("DM API unavailable");
       }
-      const listificationsConvo = convos.data.convos.find(
-        convo => convo.members.some(member => member.did === LISTIFICATIONS_DID)
+      
+      const listificationsConvo = convos.convos.find(
+        convo => convo.members.some(member => 
+          member.did === LISTIFICATIONS_DID || 
+          member.handle?.includes('listifications')
+        )
       );
 
       if (listificationsConvo) {
-        const messages = await agent.app.bsky.convo?.getMessages({
-          convoId: listificationsConvo.id,
-          limit: 50
-        });
-
-        for (const message of messages.data.messages) {
-          if (message.sender.did === LISTIFICATIONS_DID) {
-            await this.processNotification(message.text, account.handle);
+        const msgResponse = await fetch(`https://api.bsky.chat/xrpc/chat.bsky.convo.getMessages?convoId=${listificationsConvo.id}&limit=50`, {
+          headers: {
+            'Authorization': `Bearer ${agent.session?.accessJwt}`,
+            'Content-Type': 'application/json'
           }
+        });
+        
+        const messages = await msgResponse.json();
+
+        let newBlocksFound = 0;
+        for (const message of messages.messages || []) {
+          if (message.sender.did === LISTIFICATIONS_DID) {
+            const messageId = `${message.id || message.sentAt}`;
+            if (!this.processedMessages.has(messageId)) {
+              console.log(`Processing new listifications message: ${message.text}`);
+              this.processedMessages.add(messageId);
+              await this.saveProcessedMessages();
+              await this.processNotification(message.text, account.handle);
+              newBlocksFound++;
+            }
+          }
+        }
+        
+        if (newBlocksFound === 0) {
+          console.log(`No new blocks for ${account.handle}`);
         }
       }
     } catch {
       // Fallback to notifications
       try {
         console.log(`Checking notifications for ${account.handle}`);
-        const notifications = await agent.app.bsky.notification.listNotifications({ limit: 50 });
+        const notifications = await agent.app.bsky.notification.listNotifications({ limit: 100 });
         
         let foundListifications = false;
+        console.log(`Checking ${notifications.data.notifications.length} notifications for ${account.handle}`);
+        
         for (const notif of notifications.data.notifications) {
-          if (notif.author.did === LISTIFICATIONS_DID) {
+          const authorInfo = `${notif.author.handle || notif.author.did}`;
+          console.log(`Notification from ${authorInfo}: ${notif.reason}`);
+          
+          // Check for listifications with multiple possible identifiers
+          const isListifications = notif.author.did === LISTIFICATIONS_DID || 
+                                 notif.author.handle === LISTIFICATIONS_HANDLE ||
+                                 notif.author.handle === 'listifications' ||
+                                 authorInfo.includes('listifications');
+          
+          // Debug: log any notification that might be listifications
+          if (authorInfo.toLowerCase().includes('listif') || authorInfo.includes('listifications')) {
+            console.log(`FOUND LISTIFICATIONS: ${authorInfo} (${notif.author.did}) - ${notif.reason}`);
+            if (notif.reason === 'mention') {
+              const post = notif.record as any;
+              if (post?.text) {
+                console.log(`LISTIFICATIONS MESSAGE: ${post.text}`);
+              }
+            }
+          }
+          
+          if (isListifications) {
             foundListifications = true;
             console.log(`Found listifications notification: ${notif.reason}`);
             
@@ -357,31 +440,44 @@ class BlockWatcher {
       // Check DMs for backfill (fallback to notifications if DM API unavailable)
       let convos;
       try {
-        convos = await agent.app.bsky.convo?.listConvos({ limit: 10 });
-      } catch {
-        console.log(`DM API not available for ${account.handle}, skipping DM backfill`);
+        const response = await fetch('https://api.bsky.chat/xrpc/chat.bsky.convo.listConvos?limit=10', {
+          headers: {
+            'Authorization': `Bearer ${agent.session?.accessJwt}`,
+            'Content-Type': 'application/json'
+          }
+        });
+        
+        convos = await response.json();
+      } catch (error) {
+        console.log(`DM API not available for ${account.handle}, skipping DM backfill: ${error.message}`);
         return;
       }
       
-      if (!convos) {
+      if (!convos || !convos.convos) {
         console.log(`DM API not available for ${account.handle}, skipping DM backfill`);
         return;
       }
-      const listificationsConvo = convos.data.convos.find(
+      const listificationsConvo = convos.convos.find(
         convo => convo.members.some(member => member.did === LISTIFICATIONS_DID)
       );
 
       if (listificationsConvo) {
         // Get more messages for backfill
-        const messages = await agent.app.bsky.convo?.getMessages({
-          convoId: listificationsConvo.id,
-          limit: 100
+        const msgResponse = await fetch(`https://api.bsky.chat/xrpc/chat.bsky.convo.getMessages?convoId=${listificationsConvo.id}&limit=100`, {
+          headers: {
+            'Authorization': `Bearer ${agent.session?.accessJwt}`,
+            'Content-Type': 'application/json'
+          }
         });
+        
+        const messages = await msgResponse.json();
 
-        for (const message of messages.data.messages) {
+        for (const message of messages.messages || []) {
           if (message.sender.did === LISTIFICATIONS_DID) {
             const messageTime = new Date(message.sentAt);
             if (messageTime >= cutoffTime) {
+              const messageId = `${message.id || message.sentAt}`;
+              this.processedMessages.add(messageId); // Mark as processed during backfill
               await this.processNotification(message.text, account.handle, true);
             }
           }
@@ -393,11 +489,15 @@ class BlockWatcher {
   }
 
   private async processNotification(text: string, targetHandle: string, isBackfill = false) {
+    console.log(`Processing notification text: "${text}" for ${targetHandle}`);
+    
     const blockPattern = /@([\w.-]+)\s+has blocked you/i;
     const modListPattern = /@([\w.-]+)\s+has added you to the "[^"]*"\s+moderation list/i;
     
     const blockMatch = text.match(blockPattern);
     const modListMatch = text.match(modListPattern);
+    
+    console.log(`Block match: ${blockMatch ? blockMatch[1] : 'none'}, Mod list match: ${modListMatch ? modListMatch[1] : 'none'}`);
     
     if (!blockMatch && !modListMatch) {
       return;
@@ -425,7 +525,12 @@ class BlockWatcher {
   }
 
   private async addToBlockersList(userDid: string) {
-    if (!this.listAgent) return;
+    if (!this.listAgent) {
+      console.error("No list agent available");
+      return;
+    }
+    
+    console.log(`Attempting to add ${userDid} to blockers list: ${this.blockersListUri}`);
     
     // Check if user is already in the list
     try {
@@ -440,7 +545,7 @@ class BlockWatcher {
         return;
       }
     } catch (error) {
-      console.error(`Failed to check if user in list:`, error);
+      console.error(`Failed to check if user in list:`, error.message);
     }
     
     if (this.dryRun) {
