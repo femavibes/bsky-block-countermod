@@ -26,6 +26,9 @@ COPY --from=prerelease /usr/src/app/src ./src
 COPY --from=prerelease /usr/src/app/scripts ./scripts
 COPY --from=prerelease /usr/src/app/package.json .
 
+# Create logs directory with proper permissions
+RUN mkdir -p /usr/src/app/logs && chown -R bun:bun /usr/src/app/logs
+
 # Run the app
 USER bun
 EXPOSE 3000/tcp

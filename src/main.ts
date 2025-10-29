@@ -30,7 +30,7 @@ class BlockWatcher {
   private pollInterval: number = 30000;
   private dryRun: boolean = false;
   private backfillHours: number = 24;
-  private sessionsFile = "/tmp/sessions.json";
+  private sessionsFile = "/usr/src/app/logs/sessions.json";
 
   constructor() {
     this.loadConfig();
@@ -166,9 +166,12 @@ class BlockWatcher {
     }
     
     try {
+      // Ensure logs directory exists and is writable
+      await Bun.write("/usr/src/app/logs/.test", "test");
       await Bun.write(this.sessionsFile, JSON.stringify(sessions, null, 2));
+      console.log("Sessions saved successfully");
     } catch (error) {
-      console.error("Failed to save sessions:", error);
+      console.warn("Failed to save sessions (will retry on next restart):", error.message);
     }
   }
 
