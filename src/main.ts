@@ -301,17 +301,29 @@ class BlockWatcher {
         }
       }
     } catch {
-      // Fallback to mentions
+      // Fallback to notifications
       try {
+        console.log(`Checking notifications for ${account.handle}`);
         const notifications = await agent.app.bsky.notification.listNotifications({ limit: 50 });
         
+        let foundListifications = false;
         for (const notif of notifications.data.notifications) {
-          if (notif.author.did === LISTIFICATIONS_DID && notif.reason === "mention") {
-            const post = notif.record as any;
-            if (post?.text) {
-              await this.processNotification(post.text, account.handle);
+          if (notif.author.did === LISTIFICATIONS_DID) {
+            foundListifications = true;
+            console.log(`Found listifications notification: ${notif.reason}`);
+            
+            if (notif.reason === "mention") {
+              const post = notif.record as any;
+              if (post?.text) {
+                console.log(`Processing mention: ${post.text.substring(0, 100)}...`);
+                await this.processNotification(post.text, account.handle);
+              }
             }
           }
+        }
+        
+        if (!foundListifications) {
+          console.log(`No listifications notifications found for ${account.handle}`);
         }
       } catch (error) {
         console.error(`Failed to check notifications for ${account.handle}:`, error);
